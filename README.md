@@ -23,6 +23,7 @@ This repository contains the complete end-to-end pipeline, from raw data collect
 *   **`tools/`**: Auxiliary engineering utilities for model preparation:
     *   `train_save_pca.py`: Generates the PCA model for semantic analysis.
     *   `build_history.py`: Generates the historical statistics database.
+    *   `train_xgboost.py`: The main training script. It performs hyperparameter tuning, threshold optimization, and exports the final model.
 
 ***
 ## System Architecture
@@ -84,7 +85,28 @@ To reproduce the training phase or update the models with new data:
 
 1.  **Data Collection**: Use the scraper script located in the `scripts/` directory to fetch the latest changes from Gerrit.
 2.  **Feature Engineering**: Run the processing script to generate the `openstack_complete.csv` file within `data/processed_data/`.
-3.  **Model Training**: Execute `train_save_pca.py` and `build_history.py` to regenerate the `pca_model.pkl` and `stats_complete.json` files required by the backend.
+3.  **Model Training Artifacts**:
+    Generate the necessary dependency files for the backend.
+    
+    First, build the semantic and historical models:
+    ```bash
+    python tools/train_save_pca.py
+    python tools/build_history.py
+    ```
+
+    Then, train the XGBoost classifier. This script uses RandomizedSearchCV for hyperparameter optimization and TimeSeriesSplit for validation:
+    ```bash
+    python tools/train_xgboost.py
+    ```
+    *Output: `backend_server/xgboost_optimized.json` and `backend_server/threshold.txt`*
+
+## Scientific Methodology
+
+The predictive model is built using a rigorous data science approach to ensure reliability in a production environment:
+
+1.  **Temporal Validation**: We use `TimeSeriesSplit` instead of random K-Fold cross-validation. This ensures the model is trained on past data and tested on future data, preventing data leakage.
+2.  **Class Imbalance Handling**: Since backport candidates are rare, we calculate a dynamic `scale_pos_weight` and perform **Threshold Moving** to find the optimal decision boundary that maximizes accuracy, rather than using the default 0.5 threshold.
+3.  **Hyperparameter Tuning**: The model structure (depth, learning rate, subsample ratio) is optimized using `RandomizedSearchCV` to prevent overfitting.
 
 ## Technologies Used
 

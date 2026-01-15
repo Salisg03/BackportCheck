@@ -1,23 +1,30 @@
+# BackportCheck: An AI-Powered Decision Support System for OpenStack
+
+**Version 2.2**
+
 ## Project Overview
 
-The OpenStack Backport Assistant is a machine learning-based tool designed to optimize the maintenance workflow of the OpenStack cloud computing platform. It assists maintainers by predicting the eligibility of code changes for backporting in real-time within the Gerrit review interface.
+BackportCheck is a machine learning-based tool designed to optimize the maintenance workflow of the OpenStack cloud computing platform. It assists maintainers by predicting the eligibility of code changes for backporting in real-time within the Gerrit review interface.
 
-This system bridges the gap between historical data analysis and daily operational decisions by leveraging a hybrid architecture: a Gradient Boosting model (XGBoost) for high-precision risk assessment and a Large Language Model (Llama 3 via Groq) for explainable AI (XAI) justifications. 
+This system bridges the gap between historical data analysis and daily operational decisions by leveraging a hybrid architecture: a Gradient Boosting model (XGBoost) for high-precision risk assessment and a Large Language Model (Llama 3 via Groq) for explainable AI (XAI) justifications.
+
 
 ## Repository Structure
 
 This repository contains the complete end-to-end pipeline, from raw data collection to the deployed inference engine.
 
-*   **`backend_server/`**: The core Python Flask API. It hosts the pre-trained XGBoost model, the PCA transformation pipeline, and the historical statistics engine. It handles inference requests from the browser extension.
+*   **`backend_server/`**: The core Python Flask API. It hosts the pre-trained XGBoost model, the PCA transformation pipeline (`pca_model.pkl`), and the historical statistics engine (`stats_complete.json`).
 *   **`extension/`**: The client-side Chrome extension source code. It injects the analysis interface directly into the OpenStack Gerrit UI.
-*   **`data/`**: The complete research datasets used for this project.
-    *   `raw_data/`: JSONL files extracted directly from the Gerrit API.
-    *   `processed_data/`: Cleaned CSV datasets with computed features, ready for training.
-*   **`scripts/`** (or `tools/`): The engineering utilities required to reproduce the scientific results.
-    *   **Scraper**: Scripts to mine historical change data from OpenStack repositories.
-    *   **Processor**: Feature engineering logic converting raw text/metadata into mathematical vectors.
-    *   **Training**: Scripts to generate PCA models and historical statistics.
+*   **`data/`**: Contains the datasets and the extraction logic:
+    *   **`scraper.py`**: Script to mine historical change data from OpenStack repositories.
+    *   **`features_generator.py`**: Feature engineering logic converting raw text/metadata into mathematical vectors.
+    *   `raw_data/`: Storage for extracted JSONL files.
+    *   `processed_data/`: Storage for cleaned CSV datasets ready for training.
+*   **`tools/`**: Auxiliary engineering utilities for model preparation:
+    *   `train_save_pca.py`: Generates the PCA model for semantic analysis.
+    *   `build_history.py`: Generates the historical statistics database.
 
+***
 ## System Architecture
 
 The solution operates on a three-tier architecture:
@@ -48,8 +55,15 @@ Ensure Python 3.8 or higher is installed.
     ```bash
     pip install -r requirements.txt
     ```
-3.  Configure the Environment:
-    Set your Groq API key in your environment variables or directly in `app.py` to enable the LLM explanation features.
+3.  **Configuration (Environment Variables):**
+    To enable the Generative AI explanation features, you must configure your Groq API key securely.
+    *   Create a file named `.env` inside the `backend_server/` directory.
+    *   Add your API key to this file in the following format:
+        ```env
+        GROQ_API_KEY=gsk_your_api_key_here
+        ```
+    *   The application will automatically load this variable upon startup.
+
 4.  Start the service:
     ```bash
     python app.py
@@ -62,7 +76,7 @@ Ensure Python 3.8 or higher is installed.
 2.  Enable **Developer mode** in the top right corner.
 3.  Click **Load unpacked**.
 4.  Select the `extension/` directory from this repository.
-5.  Navigate to an OpenStack Gerrit review page (e.g., `review.opendev.org`) to observe the assistant in action.
+5.  Navigate to an OpenStack Gerrit review page (e.g., `review.opendev.org`) to observe BackportCheck in action.
 
 ## Data Pipeline and Reproduction
 

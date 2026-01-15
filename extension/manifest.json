@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "BackportCheck",
+  "short_name": "BackportCheck",
+  "version": "1.0",
+  "description": "AI-powered analysis for OpenStack backport candidates.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "http://localhost:5000/*",
+    "https://review.opendev.org/*",
+    "https://*.gerrit.org/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icon.png", "48": "icon.png", "128": "icon.png" }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://review.opendev.org/*", "https://*.gerrit.org/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": { "16": "icon.png", "48": "icon.png", "128": "icon.png" }
+}

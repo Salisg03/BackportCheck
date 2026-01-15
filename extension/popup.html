@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {
+            width: 280px;
+            padding: 15px;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            color: #333;
+            background-color: #fff;
+        }
+        h3 {
+            margin: 0 0 20px 0;
+            color: #005c9c;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .control-group {
+            margin-bottom: 20px;
+        }
+        label {
+            font-size: 12px;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .val-display {
+            color: #005c9c;
+            font-weight: bold;
+        }
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+        }
+        .range-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: #666;
+            margin-top: 5px;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #f8f9fa;
+            border: 1px solid #ccc;
+            color: #333;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 12px;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background: #e2e6ea;
+        }
+    </style>
+</head>
+<body>
+    <h3>BackportCheck Settings</h3>
+
+    <div class="control-group">
+        <label>
+            Threshold
+            <span id="thresh-val" class="val-display">0.50</span>
+        </label>
+        <input type="range" id="threshold" min="0.1" max="0.9" step="0.01" value="0.5">
+        
+    
+        <div class="range-labels">
+            <span>More permissive</span>
+            <span>More strict</span>
+        </div>
+    </div>
+
+    <button id="toggle-panel">Show/Hide Panel</button>
+
+    <script src="popup.js"></script>
+</body>
+</html>

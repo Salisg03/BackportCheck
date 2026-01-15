@@ -1,6 +1,6 @@
 # BackportCheck: An AI-Powered Decision Support System for OpenStack
 
-**Version 2.2**
+**Version 1.0**
 
 ## Project Overview
 

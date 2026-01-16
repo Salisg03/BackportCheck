@@ -173,7 +173,15 @@ class SemanticEngine:
         self.pca = None
         try:
             print("Loading CodeBERT & PCA...")
-            self.bert = SentenceTransformer('microsoft/codebert-base')
+
+            model_path = os.path.join(Config.BASE_DIR, 'model_cache')
+            if os.path.exists(model_path):
+                print(f"Loading locally from {model_path}...")
+                self.bert = SentenceTransformer(model_path)
+            else:
+                # Fallback to internet (in case the folder doesn't exist)
+                self.bert = SentenceTransformer('microsoft/codebert-base')
+
             with open(Config.PCA_PATH, "rb") as f:
                 self.pca = pickle.load(f)
             print("Semantic Engine loaded.")

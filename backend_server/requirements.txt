@@ -1,12 +1,22 @@
+#Web API & Server 
 flask
 flask-cors
-pandas
-numpy
-xgboost
-scikit-learn
-sentence-transformers
-groq
 requests
 python-dotenv
-#elle force la version légère (CPU seulement)
+
+#Data Processing & Maths 
+pandas
+numpy
+
+# Classical Machine Learning 
+xgboost
+scikit-learn
+
+# AI & LLM Integration 
+sentence-transformers
+groq
+
+# Deep Learning Core (Optimization) 
+# Forces the installation of the CPU-only version of PyTorch.
+# This significantly reduces the size of the Docker image and local installation 
 torch --index-url https://download.pytorch.org/whl/cpu

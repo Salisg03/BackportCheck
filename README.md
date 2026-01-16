@@ -83,7 +83,13 @@ Use this method for development or if you do not have Docker installed.
     ```bash
     pip install -r requirements.txt
     ```
-3.  Start the service:
+
+3.  **Download the AI Models (Mandatory):**
+    This step downloads CodeBERT locally to avoid timeouts and enables offline usage.
+    ```bash
+    python tools/download_model.py
+    ```
+4.  Start the service:
     ```bash
     python app.py
     ```

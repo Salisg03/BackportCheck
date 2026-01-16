@@ -442,46 +442,51 @@ class LLMExplainer:
         is_accepted = prob >= threshold
         verdict = "RECOMMENDED (Backport Candidate)" if is_accepted else "NOT RECOMMENDED (Rejected)"
         
-        # Formatting features
-        features_json = self._format_features_for_ai(features)
+        all_files = list(files.keys())
+        files_text = "\n".join([f"- {f}" for f in all_files])
         
-        # Formatting files
-        file_list = [f"- {f}" for f in list(files.keys())[:5]]
-        files_text = "\n".join(file_list)
-        if len(files) > 5: files_text += f"\n... ({len(files)-5} more files)"
+        # Safety net: If the file list is truly massive (> 4000 chars), we truncate to avoid API errors
+        if len(files_text) > 4000:
+            files_text = files_text[:4000] + "\n... (List truncated: too many files)"
+
+        # 2. Full Commit Message (2000 chars is usually enough for even very long descriptions)
+        full_msg = msg[:2000] 
 
         # Dynamic Instructions (To enforce alignment with the XGBoost score)
         if is_accepted:
-            instruction = "Justify why this change is safe or critical. Highlight positive metrics (e.g., high Trust, low Risk, Bug references, or specific file types)."
+            instruction = "Explain why this change is safe to backport. Focus on High Trust, Low Risk/Impact, or the critical nature of the fix."
         else:
-            instruction = "Explain why this was rejected. Highlight negative metrics (e.g., low Trust, high Complexity, 'Feature' type, or lack of Bug ID)."
-
-        
+            instruction = "Explain the rejection. Focus on risks like Low Author Trust, High Code Complexity (Entropy), or the fact it looks like a Feature/Refactor."
+            
         prompt = f"""
         Act as a Senior OpenStack Release Manager. 
-        You have access to the full predictive analysis profile of a commit.
+        Evaluate this commit based on the predictive risk profile below.
         
-        *DECISION :
+        === DECISION CONTEXT ===
         VERDICT: {verdict}
-        CONFIDENCE SCORE: {prob:.1%} (Threshold: {threshold})
-        DISPLAY TYPE: {display_type}
+        CONFIDENCE: {prob:.1%} (Threshold: {threshold})
+        TYPE: {display_type}
 
-        *FULL METRICS PROFILE :
-        {features_json}
+        === RISK METRICS (Internal Data) ===
+        {self._format_features_for_ai(features)}
 
-        *COMMIT CONTEXT :
-        Message: {msg}...
-        Files Modified:
+        === COMMIT CONTENT ===
+        Message: 
+        {full_msg}
+        
+        Files Modified ({len(all_files)} total):
         {files_text}
 
-        *INSTRUCTION :
-        Based strictly on the METRICS above: {instruction}
+        === INSTRUCTION ===
+        {instruction}
         
-        - You CAN cite specific metric names (e.g., "Deletion Ratio", "Is Revert") to prove your point.
-        - Be concise (2 sentences max).
-        - Do not mention the semantic vectors.
-        """
 
+        Guidelines:
+        1. **Prioritize qualitative reasoning over listing raw numbers.** You may cite a specific metric (e.g. "Trust Score") ONLY if it is the main reason for the decision, but avoid simply reading out the stats.
+        2. **Connect the dots**: Relate the file types or commit message to the risk score.
+        3. **Interpret the metrics**
+        4. Be professional, direct, and concise (2 sentences max).
+        """
         try:
             chat = self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],

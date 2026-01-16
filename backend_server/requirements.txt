@@ -7,3 +7,6 @@ scikit-learn
 sentence-transformers
 groq
 requests
+python-dotenv
+#elle force la version légère (CPU seulement)
+torch --index-url https://download.pytorch.org/whl/cpu

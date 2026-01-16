@@ -1,0 +1,11 @@
+services:
+  backport-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      cache_from:
+        - backend_server-backport-backend:latest
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env

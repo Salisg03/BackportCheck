@@ -233,18 +233,92 @@ class FeatureEngine:
     @staticmethod
     def smart_classify_display(msg, paths):
         """
-        Heuristic classification for User Interface display purposes.
-        Uses regex patterns to detect specific change types (Refactor, Chore, Revert) that are not natively distinguished by the XGBoost model."""
+        Classification UI : Ajout de la détection 'Style/Lint' et 'Refactor'.
+        """
         msg_l = msg.lower(); subject = msg_l.split('\n')[0]
-        if re.match(r'^(refactor|chore|style|build|revert)', subject) or any(k in subject for k in ['refactor', 'cleanup']): return "Refactor"
+        
+        # 1. REFACTOR / STYLE / LINT 
+        # Détecte: "ansible-lint:", "pep8:", "flake8", "lint fix", "whitespace"
+        if re.search(r'\b(lint(ing|er)?|pep8|flake8|hacking|style|formatting|whitespace|indentation)\b', subject):
+            return "Refactor"
+        
+        # Détecte les classiques: refactor, cleanup, dead code
+        if re.search(r'\b(refactor(ing|ed)?|clean[- ]?up|prune|dead[- ]?code|unused)\b', subject):
+            return "Refactor"
+        
+        # Tags explicites
+        if re.match(r'^(chore|style|nit|build|refactor)', subject):
+            return "Refactor"
+            
+        # 2. REVERT
+        if re.match(r'^revert\b', subject) or "this reverts commit" in msg_l:
+            return "Revert"
+
+        # 3. DEPENDENCY
+        if re.search(r'\b(bump|upgrade|update)\b.*\b(dependency|requirements|version|lib|tox)\b', subject):
+            return "Dependency Upgrade"
+
         return None
 
     @staticmethod
+    def _get_strict_model_type(msg, paths):
+        """
+        Classification Modèle
+        """
+        msg_l = msg.lower()
+        subject = msg_l.split('\n')[0].strip()
+        
+        #1.BUG FIX (Priority Detection)**
+        #A.The word "Fix" at the very beginning (e.g., "Fix idempotence...")
+        #Accepts "fix" followed by a space, or "fixes", "fixed"
+        if re.match(r'^fix(es|ed|ing)?\s+', subject):
+            return "Bug Fix"
+            
+        # ex: "issue with podman fixed", "bug in nova", "patch for crash"
+        strong_keywords = r'\b(hot[-]?fix|bug[-]?fix|quick[-]?fix|patch|crash|panic|traceback|exception|error|failure)\b'
+        if re.search(strong_keywords, subject):
+            return "Bug Fix"
+
+        #C. Analysis of the message body (Official OpenStack tags)
+        # ex: "Closes-Bug: #123", "Closes-Bug: 123", "Related-Bug:", "Partial-Bug:"
+        if re.search(r'^\s*(closes|related|partial)-bug:\s*#?\d+', msg_l, re.MULTILINE):
+            return "Bug Fix"
+        # 2. DOC
+        if re.search(r'\b(doc|docs|documentation|readme|typo|guide)\b', subject): return "Doc"
+        if paths and all(FeatureEngine.get_extension(f) in ['.rst', '.md', '.txt', '.png', '.svg'] for f in paths): return "Doc"
+        # 3. CI
+        if re.search(r'\b(ci|test(s|ing)?|unit[-]?test|coverage|gate|zuul|tox)\b', subject): return "CI"
+        if paths and all(('test' in f or 'zuul.d' in f or '.tox' in f) for f in paths): return "CI"
+
+        # 4. FEATURE 
+        return "Feature"
+    @staticmethod
+    def get_launchpad_metrics(message):
+        """
+        Interroge l'API Launchpad si un ID de bug est trouvé.
+        Retourne (heat, severity_score, comments).
+        """
+        match = Config.REGEX_BUG.search(message)
+        if match:
+            bug_id = match.group(1)
+            try:
+                # Timeout de 2s max pour ne pas ralentir l'app
+                r = requests.get(f"https://api.launchpad.net/1.0/bugs/{bug_id}", timeout=2)
+                if r.status_code == 200:
+                    d = r.json()
+                    
+                    # Mapping de l'importance texte vers un entier (comme le training)
+                    sev_map = {'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1, 'Wishlist': 0, 'Undecided': 0}
+                    severity = sev_map.get(d.get('importance', 'Undecided'), 0)
+                    
+                    return int(d.get('heat', 0)), severity, int(d.get('message_count', 0))
+            except Exception as e:
+                print(f"⚠ Launchpad API Warning: {e}")
+                pass
+        return 0, 0, 0
+
+    @staticmethod
     def build_vector(data, history, sem_engine):
-        """
-        The central feature engineering pipeline.
-        Aggregates data from the raw JSON, historical statistics, semantic embeddings, and NLP metrics into a single feature vector compatible with the XGBoost model.
-        """
         rev = list(data.get('revisions', {}).values())[0]
         files = rev.get('files', {})
         msg = rev.get('commit', {}).get('message', '')
@@ -254,21 +328,20 @@ class FeatureEngine:
 
         sem_vec = sem_engine.get_features(msg)
         paths = [f for f in files if f != "/COMMIT_MSG"]
+        
+        # Classification
+        nlp_type = FeatureEngine._get_strict_model_type(msg, paths)
+        display_type = FeatureEngine.smart_classify_display(msg, paths) or nlp_type
+
+        # Stats Churn
         churns = [m.get('lines_inserted',0)+m.get('lines_deleted',0) for f,m in files.items() if f != "/COMMIT_MSG"]
         total_churn = sum(churns)
         deletions = sum(m.get('lines_deleted',0) for f,m in files.items() if f != "/COMMIT_MSG")
-        
-        msg_l = msg.lower()
-        if "fix" in msg_l or "bug" in msg_l: nlp_type = "Bug Fix"
-        elif "doc" in msg_l: nlp_type = "Doc"
-        elif "test" in msg_l or "ci" in msg_l: nlp_type = "CI"
-        else: nlp_type = "Feature"
-        display_type = FeatureEngine.smart_classify_display(msg, paths) or nlp_type
 
         a_stat = history.stats["authors"].get(owner, {'submissions': 0, 'accepted_backports': 0, 'total_churn': 0})
         p_stat = history.stats["projects"].get(project, {'submissions': 0, 'accepted_backports': 0})
         avg_len, flesch, fog = FeatureEngine.analyze_text_metrics(msg)
-
+        heat, sev, comments = FeatureEngine.get_launchpad_metrics(msg)
         f = {}
         f['1_references_bug_tracker'] = 1 if Config.REGEX_BUG.search(msg) else 0
         sub = a_stat['submissions']
@@ -314,9 +387,10 @@ class FeatureEngine:
         f['28_has_gerrit_topic'] = 1 if data.get('topic') else 0
         f['29_has_subject_tag'] = 1 if Config.REGEX_SUBJECT_TAG.match(subject) else 0
         
-        test_churn = sum(c for i, c in enumerate(churns) if "test" in paths[i].lower() or "zuul" in paths[i])
-        f['31_test_code_ratio'] = test_churn / total_churn if total_churn > 0 else 0
-        f['32_config_change'] = 1 if any(FeatureEngine.get_extension(p) in ['.conf','.ini'] for p in paths) else 0
+        test_churn_val = sum(c for i, c in enumerate(churns) if "test" in paths[i].lower() or "zuul" in paths[i])
+        f['31_test_code_ratio'] = test_churn_val / total_churn if total_churn > 0 else 0
+        
+        f['32_config_change'] = 1 if any(FeatureEngine.get_extension(p) in ['.conf','.ini','.yaml','.json'] for p in paths) else 0
         f['33_desc_density'] = len(msg) / (total_churn + 1)
         
         is_weekend = 0
@@ -325,13 +399,14 @@ class FeatureEngine:
             if dt.weekday() >= 5: is_weekend = 1
         except: pass
         f['34_is_weekend'] = is_weekend
-        f['35_bug_heat'] = 0; f['36_bug_severity'] = 0; f['37_bug_comments'] = 0
+        f['35_bug_heat'] = heat
+        f['36_bug_severity'] = sev
+        f['37_bug_comments'] = comments
         f['38_is_bot'] = 1 if "bot" in data.get('owner', {}).get('name', '').lower() else 0
-        
+
         for i, v in enumerate(sem_vec): f[f'40_sem_vec_{i}'] = v
         f['full_text_dl'] = ""
         return f, display_type
-
 # 5. LLM EXPLAINER
 
 class LLMExplainer:
@@ -393,7 +468,7 @@ class LLMExplainer:
         {features_json}
 
         *COMMIT CONTEXT :
-        Message: {msg[:400]}...
+        Message: {msg}...
         Files Modified:
         {files_text}
 
@@ -490,4 +565,5 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(port=5000, debug=True, threaded=True)
+    # host='0.0.0.0' is required for Docker
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

@@ -44,9 +44,36 @@ The solution operates on a three-tier architecture:
 
 ## Installation and Usage
 
-### 1. Backend Service Setup
+You can run the backend server using **Docker (Recommended)** or **Python directly**.
 
-Ensure Python 3.8 or higher is installed.
+### Prerequisites (Configuration)
+
+To enable the Generative AI explanation features, you must configure your Groq API key securely.
+
+1.  Navigate to the `backend_server/` directory.
+2.  Create a file named `.env`.
+3.  Add your API key to this file:
+    ```env
+    GROQ_API_KEY=gsk_your_api_key_here
+    ```
+
+---
+### Option 1: Running with Docker (Recommended)
+
+This method ensures a consistent environment and dependencies.
+
+1.  Open a terminal in the root directory.
+2.  Build and start the container using Docker Compose:
+    ```bash
+    docker-compose up --build
+    ```
+3.  The API will initialize and listen on `http://127.0.0.1:5000`.
+
+---
+
+### Option 2: Manual Installation (Local Python)
+
+Use this method for development or if you do not have Docker installed.
 
 1.  Navigate to the server directory:
     ```bash
@@ -56,20 +83,12 @@ Ensure Python 3.8 or higher is installed.
     ```bash
     pip install -r requirements.txt
     ```
-3.  **Configuration (Environment Variables):**
-    To enable the Generative AI explanation features, you must configure your Groq API key securely.
-    *   Create a file named `.env` inside the `backend_server/` directory.
-    *   Add your API key to this file in the following format:
-        ```env
-        GROQ_API_KEY=gsk_your_api_key_here
-        ```
-    *   The application will automatically load this variable upon startup.
-
-4.  Start the service:
+3.  Start the service:
     ```bash
     python app.py
     ```
-    The API will initialize and listen on `http://127.0.0.1:5000`.
+
+---
 
 ### 2. Chrome Extension Installation
 

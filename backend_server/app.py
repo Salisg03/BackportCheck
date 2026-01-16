@@ -82,13 +82,13 @@ class HistoryManager:
         """
         while True:
             try:
-                # CORRECTION : On nettoie la date pour Gerrit (pas de nanosecondes)
+                # CLEANUP: Remove nanoseconds from the date for Gerrit compatibility
                 raw_date = self.stats["last_updated"]
                 clean_date = raw_date.split('.')[0] 
                 
-                print(f"[Updater] Scan depuis {clean_date}...")
+                print(f"[Updater] Scan since {clean_date}...")
                 
-                # Filtre strict pour l'apprentissage
+                # Strict filter for training
                 vote_filter = "(label:Backport-Candidate=-2 OR label:Backport-Candidate=-1 OR label:Backport-Candidate=+1 OR label:Backport-Candidate=+2)"
                 query = f'status:closed after:"{clean_date}" AND {vote_filter}'
                 
@@ -104,11 +104,11 @@ class HistoryManager:
                     if changes:
                         self._process_changes(changes)
                     else:
-                        print("[Updater] Rien de nouveau.")
+                        print("[Updater] Nothing new.")
                 else:
-                    print(f"[Updater] Erreur API Gerrit: {resp.status_code}")
+                    print(f"[Updater] Error Gerrit API: {resp.status_code}")
             except Exception as e:
-                print(f"[Updater] Erreur: {e}")
+                print(f"[Updater] Error: {e}")
             time.sleep(Config.UPDATE_INTERVAL)
 
     def _process_changes(self, changes):
@@ -123,7 +123,8 @@ class HistoryManager:
             created = change.get('updated', change.get('created'))
             if created > new_last_date: new_last_date = created
             
-            # Analyse Target (Dernier vote chronologique)
+            # Analyze Target 
+            # Extract and sort votes by date to find the final decision
             votes = change.get('labels', {}).get('Backport-Candidate', {}).get('all', [])
             valid_votes = [v for v in votes if 'date' in v and 'value' in v]
             if not valid_votes: continue
@@ -157,10 +158,10 @@ class HistoryManager:
         if count > 0:
             self.stats["last_updated"] = new_last_date
             self.save_to_disk()
-            print(f"[Updater] {count} changements appris.")
+            print(f"[Updater] {count} changes learned.")
 
 
-# 3. SEMANTIQUE
+# 3. SEMANTIC
 
 class SemanticEngine:
     def __init__(self):
@@ -171,12 +172,12 @@ class SemanticEngine:
         self.bert = None
         self.pca = None
         try:
-            print("Chargement CodeBERT & PCA...")
+            print("Loading CodeBERT & PCA...")
             self.bert = SentenceTransformer('microsoft/codebert-base')
             with open(Config.PCA_PATH, "rb") as f:
                 self.pca = pickle.load(f)
-            print("Moteur Sémantique chargé.")
-        except Exception as e: print(f"Erreur Sémantique: {e}")
+            print("Semantic Engine loaded.")
+        except Exception as e: print(f"Semantic Error: {e}")
 
     def get_features(self, message):
         """
@@ -189,7 +190,7 @@ class SemanticEngine:
         return self.pca.transform(embedding)[0]
 
 
-# 4. MOTEUR DE FEATURES 
+# 4. FEATURE ENGINE
 class FeatureEngine:
     @staticmethod
     def get_extension(filename):
@@ -233,20 +234,21 @@ class FeatureEngine:
     @staticmethod
     def smart_classify_display(msg, paths):
         """
-        Classification UI : Ajout de la détection 'Style/Lint' et 'Refactor'.
+        UI Classification: Refactor, Revert, Dependency Upgrade
+        Prioritizes certain keywords to assign a more specific display type for better UX.
         """
         msg_l = msg.lower(); subject = msg_l.split('\n')[0]
         
         # 1. REFACTOR / STYLE / LINT 
-        # Détecte: "ansible-lint:", "pep8:", "flake8", "lint fix", "whitespace"
+        # ex: "ansible-lint:", "pep8:", "flake8", "lint fix", "whitespace"
         if re.search(r'\b(lint(ing|er)?|pep8|flake8|hacking|style|formatting|whitespace|indentation)\b', subject):
             return "Refactor"
         
-        # Détecte les classiques: refactor, cleanup, dead code
+        # Detect classic terms: refactor, cleanup, dead code
         if re.search(r'\b(refactor(ing|ed)?|clean[- ]?up|prune|dead[- ]?code|unused)\b', subject):
             return "Refactor"
         
-        # Tags explicites
+        # Explicit tags
         if re.match(r'^(chore|style|nit|build|refactor)', subject):
             return "Refactor"
             
@@ -302,12 +304,12 @@ class FeatureEngine:
         if match:
             bug_id = match.group(1)
             try:
-                # Timeout de 2s max pour ne pas ralentir l'app
+                # Max 2s timeout to avoid slowing down the app
                 r = requests.get(f"https://api.launchpad.net/1.0/bugs/{bug_id}", timeout=2)
                 if r.status_code == 200:
                     d = r.json()
                     
-                    # Mapping de l'importance texte vers un entier (comme le training)
+                    # Mapping textual importance to an integer (like in training)
                     sev_map = {'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1, 'Wishlist': 0, 'Undecided': 0}
                     severity = sev_map.get(d.get('importance', 'Undecided'), 0)
                     
@@ -440,21 +442,21 @@ class LLMExplainer:
         is_accepted = prob >= threshold
         verdict = "RECOMMENDED (Backport Candidate)" if is_accepted else "NOT RECOMMENDED (Rejected)"
         
-        # Formatage des features
+        # Formatting features
         features_json = self._format_features_for_ai(features)
         
-        # Formatage des fichiers
+        # Formatting files
         file_list = [f"- {f}" for f in list(files.keys())[:5]]
         files_text = "\n".join(file_list)
         if len(files) > 5: files_text += f"\n... ({len(files)-5} more files)"
 
-        # Instructions Dynamiques (Pour forcer l'alignement avec le score XGBoost)
+        # Dynamic Instructions (To enforce alignment with the XGBoost score)
         if is_accepted:
             instruction = "Justify why this change is safe or critical. Highlight positive metrics (e.g., high Trust, low Risk, Bug references, or specific file types)."
         else:
             instruction = "Explain why this was rejected. Highlight negative metrics (e.g., low Trust, high Complexity, 'Feature' type, or lack of Bug ID)."
 
-        # LE PROMPT "OMNISCIENT" QUE TU VOULAIS
+        
         prompt = f"""
         Act as a Senior OpenStack Release Manager. 
         You have access to the full predictive analysis profile of a commit.

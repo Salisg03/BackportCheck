@@ -1,15 +1,10 @@
-
 venv/
 env/
-.venv/
+
 __pycache__/
 *.pyc
-
-.env
 .git/
 .gitignore
-docker-compose.yml
 
-# 3. Fichiers systèmes
-.DS_Store
-Thumbs.db
+.env
+docker-compose.yml

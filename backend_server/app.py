@@ -5,580 +5,544 @@ import threading
 import re
 import math
 import requests
+import textstat
 import pandas as pd
 import xgboost as xgb
-import pickle 
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from collections import defaultdict
 from groq import Groq
-from sentence_transformers import SentenceTransformer
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
+
+# Load environment variables (API Keys)
 load_dotenv()
 
-
+# --- CONFIGURATION ---
 class Config:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    MODEL_PATH = os.path.join(BASE_DIR, "xgboost_optimized.json")
+    
+    # Files
+    MODEL_PATH = os.path.join(BASE_DIR, "Xgboost_optimized.json") 
     STATS_PATH = os.path.join(BASE_DIR, "stats_complete.json")
     THRESHOLD_PATH = os.path.join(BASE_DIR, "threshold.txt")
-    PCA_PATH = os.path.join(BASE_DIR, "pca_model.pkl")
     
+    # Settings
     GERRIT_API = "https://review.opendev.org"
-    UPDATE_INTERVAL = 3600
+    UPDATE_INTERVAL = 3600  # Update history every hour
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    
-    REGEX_BUG = re.compile(r"(?:closes-bug|bug|related-bug):\s*#?(\d+)", re.IGNORECASE)
-    REGEX_CVE = re.compile(r"(cve-\d{4}-\d+|security|credential|vulnerability)", re.IGNORECASE)
-    REGEX_REVERT = re.compile(r"^revert", re.IGNORECASE)
-    REGEX_SUBJECT_TAG = re.compile(r"^\[.*?\]")
 
-# 2. GESTIONNAIRE D'HISTORIQUE 
-
+# --- 1. HISTORY MANAGER (The "Memory" of the system) ---
 class HistoryManager:
     def __init__(self):
+        # Structure matches the training script logic
         self.stats = {
-            "authors": defaultdict(lambda: {'submissions': 0, 'accepted_backports': 0, 'total_churn': 0}),
-            "files": defaultdict(lambda: {'touched': 0, 'backported': 0}),
-            "projects": defaultdict(lambda: {'submissions': 0, 'accepted_backports': 0}),
+            "authors": defaultdict(lambda: {'total': 0, 'accepted': 0, 'cumulative_churn': 0}),
+            "files": defaultdict(lambda: {'total': 0, 'accepted': 0}),
+            "projects": defaultdict(lambda: {'total': 0, 'accepted': 0}),
             "last_updated": "2020-01-01 00:00:00"
         }
         self.load_from_disk()
     
     def load_from_disk(self):
-        """
-        Loads historical statistics from the 'stats_complete.json' file into memory.
-        This allows the system to persist knowledge about author trust and file risks across server restarts.
-        """
+        """Loads historical stats from JSON to initialize the system."""
         if os.path.exists(Config.STATS_PATH):
             try:
                 with open(Config.STATS_PATH, "r") as f:
                     data = json.load(f)
-                    self.stats["authors"].update(data.get("authors", {}))
-                    self.stats["files"].update(data.get("files", {}))
-                    self.stats["projects"].update(data.get("projects", {}))
+                    # Merge loaded data into defaultdicts to prevent KeyErrors
+                    for k, v in data.get("authors", {}).items(): self.stats["authors"][k] = v
+                    for k, v in data.get("files", {}).items(): self.stats["files"][k] = v
+                    for k, v in data.get("projects", {}).items(): self.stats["projects"][k] = v
                     self.stats["last_updated"] = data.get("meta_last_updated", self.stats["last_updated"])
-                print(f"[History] Stats chargées.")
-            except Exception as e: print(f"⚠ [History] Erreur lecture: {e}")
-    #
+                print(f"[History] Stats loaded. Last update: {self.stats['last_updated']}")
+            except Exception as e: 
+                print(f"⚠ [History] Load Error: {e}")
+                # If error, we start with empty stats (safe fallback)
+
     def save_to_disk(self):
-        """
-        Persists the current in-memory statistics to the local JSON file.
-        This ensures that learning acquired from the live Gerrit stream is saved permanently.
-        """
+        """Saves current memory to disk so we don't lose progress on restart."""
         snapshot = {
             "meta_last_updated": self.stats["last_updated"],
             "authors": dict(self.stats["authors"]),
             "files": dict(self.stats["files"]),
             "projects": dict(self.stats["projects"])
         }
-        with open(Config.STATS_PATH, "w") as f: json.dump(snapshot, f)
+        try:
+            with open(Config.STATS_PATH, "w") as f: json.dump(snapshot, f)
+        except Exception as e: print(f"⚠ [History] Save Error: {e}")
 
     def fetch_and_update(self):
-        """
-        Background task that periodically polls the Gerrit API for new changes.
-        It retrieves changes closed after the last recorded timestamp to incrementally update the statistics.
-        """
+        """Background task: Periodically fetches new changes from Gerrit to update trust scores."""
         while True:
             try:
-                # CLEANUP: Remove nanoseconds from the date for Gerrit compatibility
                 raw_date = self.stats["last_updated"]
-                clean_date = raw_date.split('.')[0] 
+                clean_date = raw_date.split('.')[0] # Remove nanoseconds for API
                 
-                print(f"[Updater] Scan since {clean_date}...")
+                print(f"[Updater] Scanning for closed changes since {clean_date}...")
                 
-                # Strict filter for training
+                # Fetch only CLOSED changes that have Backport-Candidate votes
                 vote_filter = "(label:Backport-Candidate=-2 OR label:Backport-Candidate=-1 OR label:Backport-Candidate=+1 OR label:Backport-Candidate=+2)"
                 query = f'status:closed after:"{clean_date}" AND {vote_filter}'
                 
                 resp = requests.get(
                     f"{Config.GERRIT_API}/changes/",
                     params={'q': query, 'o': ['CURRENT_REVISION', 'CURRENT_FILES', 'DETAILED_LABELS', 'DETAILED_ACCOUNTS']},
-                    timeout=20
+                    timeout=30
                 )
                 
                 if resp.status_code == 200:
+                    # Remove magic prefix usually found in Gerrit responses
                     text = resp.text[4:] if resp.text.startswith(")]}'") else resp.text
                     changes = json.loads(text)
                     if changes:
                         self._process_changes(changes)
                     else:
-                        print("[Updater] Nothing new.")
+                        print("[Updater] No new relevant changes found.")
                 else:
-                    print(f"[Updater] Error Gerrit API: {resp.status_code}")
+                    print(f"[Updater] Gerrit API Error: {resp.status_code}")
             except Exception as e:
-                print(f"[Updater] Error: {e}")
+                print(f"[Updater] Exception: {e}")
+            
             time.sleep(Config.UPDATE_INTERVAL)
 
     def _process_changes(self, changes):
         """
-        Analyzes a batch of fetched changes to update trust metrics.
-        It parses the 'Backport-Candidate' labels to determine if a past submission was accepted (positive sample) or rejected, updating author and file statistics accordingly.
+        Updates internal stats based on new data.
+        CRITICAL: Uses STRICT LAST VOTE logic (ignoring 'approved' tag).
         """
         count = 0
         new_last_date = self.stats["last_updated"]
         
         for change in changes:
-            created = change.get('updated', change.get('created'))
-            if created > new_last_date: new_last_date = created
+            # 1. Update Timestamp
+            updated = change.get('updated', change.get('created'))
+            if updated > new_last_date: new_last_date = updated
             
-            # Analyze Target 
-            # Extract and sort votes by date to find the final decision
-            votes = change.get('labels', {}).get('Backport-Candidate', {}).get('all', [])
+            # 2. Determine Success (STRICT LOGIC)
+            labels = change.get('labels', {})
+            bc_label = labels.get('Backport-Candidate', {})
+            
+            votes = bc_label.get('all', [])
+            # Filter for votes with dates
             valid_votes = [v for v in votes if 'date' in v and 'value' in v]
-            if not valid_votes: continue
-            valid_votes.sort(key=lambda x: x['date'])
-            final_score = int(valid_votes[-1]['value'])
             
-            if final_score == 0: continue
-            success = 1 if final_score > 0 else 0
+            if not valid_votes: continue # Skip if no clear vote history
             
-            owner = str(change.get('owner', {}).get('_account_id', 'unknown'))
+            # Sort by date to find the final human decision
+            valid_votes.sort(key=lambda x: x.get('date', ''))
+            final_val = int(valid_votes[-1].get('value', 0))
+            
+            is_accepted = 1 if final_val >= 1 else 0
+
+            # 3. Extract Metadata
+            owner_name = change.get('owner', {}).get('name', 'Unknown')
             project = change.get('project', 'unknown')
-            rev = change.get('current_revision')
-            if not rev: continue
-            files = change['revisions'][rev].get('files', {})
+            rev_id = change.get('current_revision')
+            if not rev_id: continue
             
-            churn = sum(m.get('lines_inserted',0) + m.get('lines_deleted',0) for f,m in files.items() if f != "/COMMIT_MSG")
+            files_dict = change['revisions'][rev_id].get('files', {})
             
-            self.stats["authors"][owner]['submissions'] += 1
-            self.stats["authors"][owner]['total_churn'] += churn
-            if success: self.stats["authors"][owner]['accepted_backports'] += 1
+            # 4. Calculate Churn
+            churn = 0
+            file_list = []
+            for f_path, meta in files_dict.items():
+                if f_path == "/COMMIT_MSG": continue
+                churn += meta.get('lines_inserted', 0) + meta.get('lines_deleted', 0)
+                file_list.append(f_path)
             
-            self.stats["projects"][project]['submissions'] += 1
-            if success: self.stats["projects"][project]['accepted_backports'] += 1
+            # 5. Update Stats in Memory
+            # Author
+            self.stats["authors"][owner_name]['total'] += 1
+            self.stats["authors"][owner_name]['cumulative_churn'] += churn
+            if is_accepted: self.stats["authors"][owner_name]['accepted'] += 1
             
-            for fp in files:
-                if fp == "/COMMIT_MSG": continue
-                self.stats["files"][fp]['touched'] += 1
-                if success: self.stats["files"][fp]['backported'] += 1
+            # Project
+            self.stats["projects"][project]['total'] += 1
+            if is_accepted: self.stats["projects"][project]['accepted'] += 1
+            
+            # Files
+            for fp in file_list:
+                self.stats["files"][fp]['total'] += 1
+                if is_accepted: self.stats["files"][fp]['accepted'] += 1
+            
             count += 1
             
         if count > 0:
             self.stats["last_updated"] = new_last_date
             self.save_to_disk()
-            print(f"[Updater] {count} changes learned.")
+            print(f"[Updater] Learned from {count} new changes.")
 
 
-# 3. SEMANTIC
-
-class SemanticEngine:
+# --- 2. FEATURE EXTRACTOR (Matches FeatureEngineer Script) ---
+class FeatureExtractor:
     def __init__(self):
-        """
-        Initializes the Deep Learning models.
-        Loads the SentenceTransformer (CodeBERT) for embedding generation and the pre-trained PCA model for dimensionality reduction.
-        """
-        self.bert = None
-        self.pca = None
-        try:
-            print("Loading CodeBERT & PCA...")
-
-            model_path = os.path.join(Config.BASE_DIR, 'model_cache')
-            if os.path.exists(model_path):
-                print(f"Loading locally from {model_path}...")
-                self.bert = SentenceTransformer(model_path)
-            else:
-                # Fallback to internet (in case the folder doesn't exist)
-                self.bert = SentenceTransformer('microsoft/codebert-base')
-
-            with open(Config.PCA_PATH, "rb") as f:
-                self.pca = pickle.load(f)
-            print("Semantic Engine loaded.")
-        except Exception as e: print(f"Semantic Error: {e}")
-
-    def get_features(self, message):
-        """
-        Converts a raw commit message into a compressed semantic vector.
-        It cleans the message, generates a 768-dimensional embedding via CodeBERT, and reduces it to 15 dimensions using PCA.
-        """
-        if not self.bert or not self.pca: return [0.0] * 15
-        clean_lines = [line for line in message.split('\n') if not re.match(r'^(Change-Id|Signed-off-by):', line)]
-        embedding = self.bert.encode(["\n".join(clean_lines).strip()])
-        return self.pca.transform(embedding)[0]
-
-
-# 4. FEATURE ENGINE
-class FeatureEngine:
-    @staticmethod
-    def get_extension(filename):
-        """
-        Utility function to extract the file extension from a given file path.
-        Used to analyze file types (e.g., documentation vs. configuration).
-        """
-        return '.' + filename.split('.')[-1].lower() if '.' in filename and not filename.startswith('/') else 'none'
-    
-    @staticmethod
-    def count_syllables(word):
-        """
-        Heuristic function to count syllables in a word based on vowel patterns.
-        Used as a primitive for calculating readability scores (Flesch/Gunning Fog).
-        """
-        word = word.lower(); count = 0; vowels = "aeiouy"
-        if not word: return 0
-        if word[0] in vowels: count += 1
-        for index in range(1, len(word)):
-            if word[index] in vowels and word[index - 1] not in vowels: count += 1
-        if word.endswith("e"): count -= 1
-        if count == 0: count += 1
-        return count
-
-    @staticmethod
-    def analyze_text_metrics(message):
-        """
-        Computes linguistic complexity metrics for the commit message.
-        Returns average sentence length, Flesch Reading Ease score, and Gunning Fog index to evaluate message clarity."""
-        tokens = message.split(); token_count = len(tokens)
-        sentences = [s for s in re.split(r'[.!?]+', message) if s.strip()]
-        avg_len = token_count / max(len(sentences), 1)
-        syll = sum(FeatureEngine.count_syllables(t) for t in tokens)
-        complex_w = sum(1 for t in tokens if FeatureEngine.count_syllables(t) >= 3)
-        if token_count > 0:
-            flesch = 206.835 - (1.015 * avg_len) - (84.6 * (syll / token_count))
-            fog = 0.4 * (avg_len + 100 * (complex_w / token_count))
-        else: flesch=0; fog=0
-        return avg_len, flesch, fog
-
-    @staticmethod
-    def smart_classify_display(msg, paths):
-        """
-        UI Classification: Refactor, Revert, Dependency Upgrade
-        Prioritizes certain keywords to assign a more specific display type for better UX.
-        """
-        msg_l = msg.lower(); subject = msg_l.split('\n')[0]
+        # Regex Patterns
+        self.bug_id_pattern = re.compile(r"(?:Closes-Bug|Related-Bug|Bug):\s*#?(\d+)", re.IGNORECASE)
+        self.security_pattern = re.compile(r"(CVE-\d+|Security|Vulnerability|Credential)", re.IGNORECASE)
+        self.revert_pattern = re.compile(r"^Revert\s+\"", re.IGNORECASE)
+        self.tag_pattern = re.compile(r"\[.*?\]") 
+        self.bot_pattern = re.compile(r"\b(bot|zuul|jenkins|proposal)\b", re.IGNORECASE)
         
-        # 1. REFACTOR / STYLE / LINT 
-        # ex: "ansible-lint:", "pep8:", "flake8", "lint fix", "whitespace"
-        if re.search(r'\b(lint(ing|er)?|pep8|flake8|hacking|style|formatting|whitespace|indentation)\b', subject):
-            return "Refactor"
+        # Categorization lists
+        self.test_paths = ['test', 'tests', 'testing', 'zuul.d', '.zuul.yaml']
+        self.dep_files = ['requirements.txt', 'test-requirements.txt', 'bindep.txt', 'setup.py']
+        self.deploy_projects = {
+            'openstack/kolla', 'openstack/kolla-ansible', 'openstack/kayobe', 
+            'openstack/tripleo-heat-templates', 'openstack/puppet-openstack-integration',
+            'openstack/openstack-ansible', 'openstack/bifrost'
+        }
+
+    def calculate_entropy(self, files_dict):
+        file_churns = []
+        for f_path, stats in files_dict.items():
+            if f_path == "/COMMIT_MSG": continue
+            churn = stats.get('lines_inserted', 0) + stats.get('lines_deleted', 0)
+            if churn > 0: file_churns.append(churn)
         
-        # Detect classic terms: refactor, cleanup, dead code
-        if re.search(r'\b(refactor(ing|ed)?|clean[- ]?up|prune|dead[- ]?code|unused)\b', subject):
-            return "Refactor"
-        
-        # Explicit tags
-        if re.match(r'^(chore|style|nit|build|refactor)', subject):
-            return "Refactor"
+        total_churn = sum(file_churns)
+        if total_churn == 0: return 0.0
             
-        # 2. REVERT
-        if re.match(r'^revert\b', subject) or "this reverts commit" in msg_l:
-            return "Revert"
-
-        # 3. DEPENDENCY
-        if re.search(r'\b(bump|upgrade|update)\b.*\b(dependency|requirements|version|lib|tox)\b', subject):
-            return "Dependency Upgrade"
-
-        return None
-
-    @staticmethod
-    def _get_strict_model_type(msg, paths):
-        """
-        Classification Modèle
-        """
-        msg_l = msg.lower()
-        subject = msg_l.split('\n')[0].strip()
-        
-        #1.BUG FIX (Priority Detection)**
-        #A.The word "Fix" at the very beginning (e.g., "Fix idempotence...")
-        #Accepts "fix" followed by a space, or "fixes", "fixed"
-        if re.match(r'^fix(es|ed|ing)?\s+', subject):
-            return "Bug Fix"
-            
-        # ex: "issue with podman fixed", "bug in nova", "patch for crash"
-        strong_keywords = r'\b(hot[-]?fix|bug[-]?fix|quick[-]?fix|patch|crash|panic|traceback|exception|error|failure)\b'
-        if re.search(strong_keywords, subject):
-            return "Bug Fix"
-
-        #C. Analysis of the message body (Official OpenStack tags)
-        # ex: "Closes-Bug: #123", "Closes-Bug: 123", "Related-Bug:", "Partial-Bug:"
-        if re.search(r'^\s*(closes|related|partial)-bug:\s*#?\d+', msg_l, re.MULTILINE):
-            return "Bug Fix"
-        # 2. DOC
-        if re.search(r'\b(doc|docs|documentation|readme|typo|guide)\b', subject): return "Doc"
-        if paths and all(FeatureEngine.get_extension(f) in ['.rst', '.md', '.txt', '.png', '.svg'] for f in paths): return "Doc"
-        # 3. CI
-        if re.search(r'\b(ci|test(s|ing)?|unit[-]?test|coverage|gate|zuul|tox)\b', subject): return "CI"
-        if paths and all(('test' in f or 'zuul.d' in f or '.tox' in f) for f in paths): return "CI"
-
-        # 4. FEATURE 
-        return "Feature"
-    @staticmethod
-    def get_launchpad_metrics(message):
-        """
-        Interroge l'API Launchpad si un ID de bug est trouvé.
-        Retourne (heat, severity_score, comments).
-        """
-        match = Config.REGEX_BUG.search(message)
-        if match:
-            bug_id = match.group(1)
-            try:
-                # Max 2s timeout to avoid slowing down the app
-                r = requests.get(f"https://api.launchpad.net/1.0/bugs/{bug_id}", timeout=2)
-                if r.status_code == 200:
-                    d = r.json()
-                    
-                    # Mapping textual importance to an integer (like in training)
-                    sev_map = {'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1, 'Wishlist': 0, 'Undecided': 0}
-                    severity = sev_map.get(d.get('importance', 'Undecided'), 0)
-                    
-                    return int(d.get('heat', 0)), severity, int(d.get('message_count', 0))
-            except Exception as e:
-                print(f"⚠ Launchpad API Warning: {e}")
-                pass
-        return 0, 0, 0
-
-    @staticmethod
-    def build_vector(data, history, sem_engine):
-        rev = list(data.get('revisions', {}).values())[0]
-        files = rev.get('files', {})
-        msg = rev.get('commit', {}).get('message', '')
-        subject = data.get('subject', '')
-        owner = str(data.get('owner', {}).get('_account_id', 'unknown'))
-        project = data.get('project', 'unknown')
-
-        sem_vec = sem_engine.get_features(msg)
-        paths = [f for f in files if f != "/COMMIT_MSG"]
-        
-        # Classification
-        nlp_type = FeatureEngine._get_strict_model_type(msg, paths)
-        display_type = FeatureEngine.smart_classify_display(msg, paths) or nlp_type
-
-        # Stats Churn
-        churns = [m.get('lines_inserted',0)+m.get('lines_deleted',0) for f,m in files.items() if f != "/COMMIT_MSG"]
-        total_churn = sum(churns)
-        deletions = sum(m.get('lines_deleted',0) for f,m in files.items() if f != "/COMMIT_MSG")
-
-        a_stat = history.stats["authors"].get(owner, {'submissions': 0, 'accepted_backports': 0, 'total_churn': 0})
-        p_stat = history.stats["projects"].get(project, {'submissions': 0, 'accepted_backports': 0})
-        avg_len, flesch, fog = FeatureEngine.analyze_text_metrics(msg)
-        heat, sev, comments = FeatureEngine.get_launchpad_metrics(msg)
-        f = {}
-        f['1_references_bug_tracker'] = 1 if Config.REGEX_BUG.search(msg) else 0
-        sub = a_stat['submissions']
-        f['2_author_success_rate'] = a_stat['accepted_backports'] / sub if sub > 0 else 0
-        f['3_churn_log_size'] = math.log(total_churn + 1)
-        f['5_deletion_ratio'] = deletions / total_churn if total_churn > 0 else 0
-        f['6_file_count'] = len(paths)
-        f['8_avg_sentence_length'] = avg_len
-        f['9_msg_complexity'] = len(msg)
-        f['10_has_security_impact'] = 1 if Config.REGEX_CVE.search(msg) else 0
-        f['11_nlp_change_type'] = nlp_type
-        
-        is_test = 1 if all(("test" in p.lower() or "zuul" in p or ".tox" in p) for p in paths) and paths else 0
-        f['12_is_test_change'] = is_test
-        f['13_is_revert'] = 1 if Config.REGEX_REVERT.match(subject) else 0
-        f['14_modifies_dependencies'] = 1 if any("requirements.txt" in p or "bindep.txt" in p for p in paths) else 0
-        f['15_author_submission_count'] = sub
-        f['16_author_trust_score'] = sub / (a_stat['total_churn'] + 1)
-        
-        f_probs = []
-        for p in paths:
-            fs = history.stats["files"].get(p, {'touched': 0, 'backported': 0})
-            if fs['touched'] > 0: f_probs.append(fs['backported'] / fs['touched'])
-            else: f_probs.append(0.0)
-        f['17_historical_file_prob'] = max(f_probs) if f_probs else 0.0
-        f['18_is_documentation_only'] = 1 if all(FeatureEngine.get_extension(p) in ['.rst','.md','.txt'] for p in paths) and paths else 0
-        f['19_author_file_confidence'] = f['2_author_success_rate'] * f['17_historical_file_prob']
-        depths = [p.count('/') for p in paths]
-        f['20_risk_module_coupling'] = max(depths) if depths else 0
-        f['21_file_extension_entropy'] = len(set(FeatureEngine.get_extension(p) for p in paths))
-        f['22_relation_depth'] = len(rev.get('commit', {}).get('parents', [])) - 1
-        p_sub = p_stat['submissions']
-        f['23_project_acceptance_rate'] = p_stat['accepted_backports'] / p_sub if p_sub > 0 else 0
-        
         entropy = 0.0
-        if total_churn > 0:
-            for c in churns:
-                if c > 0: p = c / total_churn; entropy -= p * math.log2(p)
-        f['24_change_entropy'] = entropy
-        f['25_directory_depth'] = sum(depths)/len(depths) if depths else 0
-        f['26_msg_readability_ease'] = flesch
-        f['27_msg_gunning_fog'] = fog
-        f['28_has_gerrit_topic'] = 1 if data.get('topic') else 0
-        f['29_has_subject_tag'] = 1 if Config.REGEX_SUBJECT_TAG.match(subject) else 0
-        
-        test_churn_val = sum(c for i, c in enumerate(churns) if "test" in paths[i].lower() or "zuul" in paths[i])
-        f['31_test_code_ratio'] = test_churn_val / total_churn if total_churn > 0 else 0
-        
-        f['32_config_change'] = 1 if any(FeatureEngine.get_extension(p) in ['.conf','.ini','.yaml','.json'] for p in paths) else 0
-        f['33_desc_density'] = len(msg) / (total_churn + 1)
-        
-        is_weekend = 0
-        try:
-            dt = datetime.strptime(data.get('created','').split('.')[0], "%Y-%m-%d %H:%M:%S")
-            if dt.weekday() >= 5: is_weekend = 1
-        except: pass
-        f['34_is_weekend'] = is_weekend
-        f['35_bug_heat'] = heat
-        f['36_bug_severity'] = sev
-        f['37_bug_comments'] = comments
-        f['38_is_bot'] = 1 if "bot" in data.get('owner', {}).get('name', '').lower() else 0
+        for churn in file_churns:
+            p = churn / total_churn
+            entropy -= p * math.log2(p)
+        return entropy
 
-        for i, v in enumerate(sem_vec): f[f'40_sem_vec_{i}'] = v
-        f['full_text_dl'] = ""
-        return f, display_type
-# 5. LLM EXPLAINER
+    def compute_features(self, change_data, history_mgr):
+        """Converts Raw JSON -> Feature Dictionary for XGBoost"""
+        
+        # Basic parsing
+        revision_info = change_data.get('revisions', {})
+        latest_commit_hash = change_data.get('current_revision')
+        if not revision_info or not latest_commit_hash: return None, None
 
+        rev_data = revision_info[latest_commit_hash]
+        commit = rev_data.get('commit', {})
+        files = rev_data.get('files', {})
+        msg = commit.get('message', "")
+        subject = change_data.get('subject', "").lower()
+        project_name = change_data.get('project', '')
+        author_name = commit.get('author', {}).get('name', "Unknown")
+
+        # --- 1. TEXT FEATURES ---
+        feat_flesch_ease = textstat.flesch_reading_ease(msg)
+        feat_gunning_fog = textstat.gunning_fog(msg)
+        
+        match_bug = self.bug_id_pattern.search(msg)
+        feat_references_bug_tracker = 1 if match_bug else 0
+        
+        # --- 2. INTENT ---
+        ci_keywords = ['ci', 'gate', 'pipeline', 'job', 'workflow', 'tox', 'lint', 'zuul', 'playbook']
+        feat_is_ci_intent = 1 if any(k in subject for k in ci_keywords) else 0
+        feat_is_feature = 1 if re.search(r'\b(add|implement|support|introduce|new|feat|enable|allow|provide)\b', subject) else 0
+        feat_is_refactor = 1 if re.search(r'\b(refactor|clean|remove|move|rename|delete|drop)\b', subject) else 0
+        feat_is_fix = 1 if re.search(r'\b(fix|resolve|repair|patch|correct|handle|mitigate|prevent)\b', subject) else 0
+        feat_is_maintenance = 1 if re.search(r'\b(update|bump|upgrade|downgrade|pin|unpin|sync)\b', subject) else 0
+        feat_is_deploy = 1 if re.search(r'\b(config|conf|deploy|install|set|use|default|variable|param|role)\b', subject) else 0
+
+        # --- 3. FILE ANALYSIS ---
+        file_list = [f for f in files.keys() if f != "/COMMIT_MSG"]
+        feat_file_count = len(file_list)
+        
+        config_lines = 0; code_lines = 0; total_lines = 0
+        feat_modifies_config = 0; feat_modifies_migration = 0
+        feat_modifies_api = 0; feat_modifies_deps = 0; feat_is_ci_file_change = 0
+        
+        config_exts = {'.yaml', '.yml', '.json', '.ini', '.conf', '.toml', '.xml', '.j2', '.rst', '.md', '.erb'}
+        code_exts = {'.py', '.c', '.h', '.cpp', '.java', '.go', '.sh', '.js', '.ts', '.pp'} 
+        ci_files_list = ['.zuul.yaml', 'zuul.d', '.gitlab-ci.yml', '.travis.yml', 'tox.ini', 'bindep.txt']
+
+        for f_path in file_list:
+            f_lower = f_path.lower()
+            stats = files[f_path]
+            lines_changed = stats.get('lines_inserted', 0) + stats.get('lines_deleted', 0)
+            total_lines += lines_changed
+            
+            if 'conf' in f_lower or '.ini' in f_lower or '.yaml' in f_lower: feat_modifies_config = 1
+            if 'alembic' in f_lower or 'migration' in f_lower or 'upgrade' in f_lower: feat_modifies_migration = 1
+            if 'api/' in f_lower or 'v1/' in f_lower or 'v2/' in f_lower: feat_modifies_api = 1
+            if any(df in f_lower for df in self.dep_files): feat_modifies_deps = 1
+            if any(cif in f_lower for cif in ci_files_list): feat_is_ci_file_change = 1
+            
+            ext = "." + f_path.split('.')[-1].lower() if '.' in f_path else ""
+            if ext in config_exts: config_lines += lines_changed
+            elif ext in code_exts: code_lines += lines_changed
+
+        feat_config_ratio = config_lines / total_lines if total_lines > 0 else 0.0
+        feat_code_ratio = code_lines / total_lines if total_lines > 0 else 0.0
+        feat_is_ci_change = 1 if (feat_is_ci_file_change == 1 or feat_is_ci_intent == 1) else 0
+        feat_is_pure_config = 1 if (feat_config_ratio > 0.99) else 0
+
+        # --- 4. ENTROPY & DENSITY ---
+        feat_entropy = self.calculate_entropy(files)
+        churn_raw = total_lines
+        feat_churn_density = churn_raw / feat_file_count if feat_file_count > 0 else 0.0
+        feat_churn_log = math.log(churn_raw + 1)
+        total_deletions = sum(f.get('lines_deleted', 0) for f in files.values())
+        feat_deletion_ratio = total_deletions / churn_raw if churn_raw > 0 else 0.0
+
+        depths = [f.count('/') + 1 for f in file_list]
+        feat_dir_depth = sum(depths) / len(depths) if depths else 0
+        feat_ext_entropy = len(set([f.split('.')[-1] for f in file_list if '.' in f]))
+        feat_is_deploy_project = 1 if any(dp in project_name for dp in self.deploy_projects) else 0
+        feat_is_bot = 1 if self.bot_pattern.search(author_name) else 0
+
+        # --- 5. HISTORICAL FEATURES (Time Travel Lookups) ---
+        # Author Stats
+        a_stats = history_mgr.stats["authors"].get(author_name, {'total': 0, 'accepted': 0, 'cumulative_churn': 0})
+        feat_author_success = a_stats['accepted'] / a_stats['total'] if a_stats['total'] > 0 else 0.0
+        feat_author_sub_count = a_stats['total']
+        feat_author_trust = a_stats['total'] / (a_stats['cumulative_churn'] + 1)
+        
+        # Project Stats
+        p_stats = history_mgr.stats["projects"].get(project_name, {'total': 0, 'accepted': 0})
+        feat_proj_accept = p_stats['accepted'] / p_stats['total'] if p_stats['total'] > 0 else 0.0
+        
+        # File Probabilities
+        f_probs = []
+        for f in file_list:
+            fs = history_mgr.stats["files"].get(f, {'total': 0, 'accepted': 0})
+            f_probs.append(fs['accepted'] / fs['total'] if fs['total'] > 0 else 0.0)
+        feat_hist_file_prob = max(f_probs) if f_probs else 0.0
+
+        # --- 6. INTERACTIONS ---
+        feat_safe_entropy = feat_entropy * feat_is_pure_config
+
+        # --- ASSEMBLE DICT (Matching Model columns) ---
+        features = {
+            "safe_entropy_interaction": feat_safe_entropy,
+            "is_bot": feat_is_bot,
+            "is_deployment_project": feat_is_deploy_project,
+            "is_pure_config": feat_is_pure_config,
+            "is_fix": feat_is_fix,
+            "is_feature": feat_is_feature,
+            "is_maintenance": feat_is_maintenance,
+            "is_deployment": feat_is_deploy,
+            "is_ci_change": feat_is_ci_change,
+            "is_refactor": feat_is_refactor,
+            "config_line_ratio": feat_config_ratio,
+            "code_line_ratio": feat_code_ratio,
+            "churn_density": feat_churn_density,
+            "change_entropy": feat_entropy,
+            "file_count": feat_file_count,
+            "churn_log_size": feat_churn_log,
+            "deletion_ratio": feat_deletion_ratio,
+            "msg_readability_ease": feat_flesch_ease,
+            "msg_gunning_fog": feat_gunning_fog,
+            "references_bug_tracker": feat_references_bug_tracker,
+            "has_subject_tag": 1 if self.tag_pattern.search(subject) else 0,
+            "modifies_db_migration": feat_modifies_migration,
+            "modifies_dependencies": feat_modifies_deps,
+            "modifies_config": feat_modifies_config,
+            "modifies_public_api": feat_modifies_api,
+            "has_security_impact": 1 if self.security_pattern.search(msg) else 0,
+            "is_test_change": 1 if all(tp in f for f in file_list for tp in self.test_paths) else 0,
+            "is_revert": 1 if self.revert_pattern.match(change_data.get('subject', '')) else 0,
+            "is_documentation_only": 1 if all((f.endswith('.rst') or f.endswith('.md') or 'doc/' in f) for f in file_list) else 0,
+            "directory_depth": feat_dir_depth,
+            "file_extension_entropy": feat_ext_entropy,
+            "has_gerrit_topic": 1 if change_data.get('topic') else 0,
+            
+            # Historical
+            "author_success_rate": feat_author_success,
+            "author_submission_count": feat_author_sub_count,
+            "author_trust_score": feat_author_trust,
+            "project_acceptance_rate": feat_proj_accept,
+            "historical_file_prob": feat_hist_file_prob
+        }
+        
+        # Determine Display Type for UI (for the LLM and the Frontend)
+        display_type = "Feature"
+        if feat_is_fix: display_type = "Bug Fix"
+        elif feat_is_ci_change: display_type = "CI/Infra"
+        elif feat_is_refactor: display_type = "Refactor"
+        elif feat_modifies_deps: display_type = "Dependency"
+        elif feat_is_maintenance: display_type = "Maintenance"
+        elif features["is_documentation_only"]: display_type = "Docs"
+        
+        return features, display_type
+# --- 3. LLM EXPLAINER (Generates AI Justifications) ---
 class LLMExplainer:
     def __init__(self):
-        """
-        Initializes the client for the Groq API.
-        Sets up the connection to use the Llama-3 model for natural language generation.
-        """
         try:
             self.client = Groq(api_key=Config.GROQ_API_KEY)
             self.model = "llama-3.3-70b-versatile"
         except: self.client = None
 
-    def _format_features_for_ai(self, features):
-        """Cleans up technical feature names into readable text for the AI."""
-        readable_map = {}
+    def _format_vector(self, features):
+        """
+        Transforms the raw dictionary into a clean, readable JSON string for the AI.
+        - Rounds floats to 3 decimals.
+        - Converts Booleans to Yes/No.
+        - Formats keys to Title Case.
+        """
+        clean_data = {}
         for key, value in features.items():
-            if "sem_vec" in key or "full_text" in key: continue
-            clean_key = re.sub(r'^\d+_', '', key).replace('_', ' ').title()
-            if isinstance(value, float): readable_map[clean_key] = round(value, 4)
-            else: readable_map[clean_key] = value
-        return json.dumps(readable_map, indent=2)
+            # Make key readable (e.g. "author_trust_score" -> "Author Trust Score")
+            readable_key = key.replace('_', ' ').title()
+            
+            if isinstance(value, bool) or value in [0, 1] and "is_" in key:
+                clean_data[readable_key] = "Yes" if value else "No"
+            elif isinstance(value, float):
+                clean_data[readable_key] = round(value, 3)
+            else:
+                clean_data[readable_key] = value
+        
+        return json.dumps(clean_data, indent=2)
 
     def explain(self, msg, files, prob, features, display_type, threshold):
-        """
-        Generates a natural language justification for the prediction.
-        Constructs a prompt containing the decision context, metrics, and file list, then queries the LLM to explain why the change was accepted or rejected.
-        """
-        if not self.client: return "AI unavailable."
+        if not self.client: return "AI Explanation unavailable."
         
         is_accepted = prob >= threshold
-        verdict = "RECOMMENDED (Backport Candidate)" if is_accepted else "NOT RECOMMENDED (Rejected)"
+        verdict = "RECOMMENDED" if is_accepted else "NOT RECOMMENDED"
         
-        all_files = list(files.keys())
-        files_text = "\n".join([f"- {f}" for f in all_files])
-        
-        # Safety net: If the file list is truly massive (> 4000 chars), we truncate to avoid API errors
-        if len(files_text) > 4000:
-            files_text = files_text[:4000] + "\n... (List truncated: too many files)"
-
-        # 2. Full Commit Message (2000 chars is usually enough for even very long descriptions)
-        full_msg = msg[:2000] 
-
-        # Dynamic Instructions (To enforce alignment with the XGBoost score)
-        if is_accepted:
-            instruction = "Explain why this change is safe to backport. Focus on High Trust, Low Risk/Impact, or the critical nature of the fix."
+        # 1. Prepare File List
+        file_list = list(files.keys())
+        if len(file_list) > 50:
+            file_str = "\n".join(file_list[:50]) + f"\n... (+ {len(file_list)-50} more)"
         else:
-            instruction = "Explain the rejection. Focus on risks like Low Author Trust, High Code Complexity (Entropy), or the fact it looks like a Feature/Refactor."
-            
+            file_str = "\n".join(file_list)
+
+        # 2. Prepare Full Feature Vector (JSON)
+        feature_vector_json = self._format_vector(features)
+
+        # 3. Prompt with Context & Full Data
         prompt = f"""
-        Act as a Senior OpenStack Release Manager. 
-        Evaluate this commit based on the predictive risk profile below.
+        Act as a Senior OpenStack Release Manager. Justify the decision to {verdict} this backport.
+
+        === DECISION ===
+        VERDICT: {verdict} (Confidence: {prob:.1%}, Threshold: {threshold})
+        CATEGORY: {display_type}
+
+        === CONTEXT: HOW TO INTERPRET THE DATA ===
+        - Author Trust Score: Ratio of accepted backports. 0.0=New, >0.5=Trusted.
+        - Historical File Prob: Probability these specific files are usually backported.
+        - Change Entropy: Code complexity (0=Simple, >4=Complex/Scattered).
+        - Churn Density: Lines changed per file (High = Dense/Risky).
+        - Modifies DB/API: Critical risk factors.
+
+        === FULL FEATURE VECTOR (Internal Data) ===
+        {feature_vector_json}
+
+        === CHANGE ARTIFACTS ===
+        Commit Message:
+        "{msg}"
+
+        Files Modified:
+        {file_str}
+
+        === INSTRUCTIONS ===
+        Write a professional, 2-3 sentence justification.
         
-        === DECISION CONTEXT ===
-        VERDICT: {verdict}
-        CONFIDENCE: {prob:.1%} (Threshold: {threshold})
-        TYPE: {display_type}
-
-        === RISK METRICS (Internal Data) ===
-        {self._format_features_for_ai(features)}
-
-        === COMMIT CONTENT ===
-        Message: 
-        {full_msg}
+        1. **Analyze the Vector:** Look at the "Full Feature Vector" above. Find the anomalies or strong signals.
+        2. **Synthesize:** Do not list the numbers. Explain their *meaning*.
+           - Instead of saying "Is Pure Config is Yes", say "The change is a low-risk configuration update."
+           - Instead of saying "Trust is 0.0", say "The author lacks a prior track record."
+        3. **Explain the Verdict:**
+           - If REJECTED: Is it the Author? The Complexity? The specific Files? ...
+           - If ACCEPTED: Is it the Safety (Config/Doc)? The High Trust? ...
         
-        Files Modified ({len(all_files)} total):
-        {files_text}
-
-        === INSTRUCTION ===
-        {instruction}
-        
-
-        Guidelines:
-        1. **Prioritize qualitative reasoning over listing raw numbers.** You may cite a specific metric (e.g. "Trust Score") ONLY if it is the main reason for the decision, but avoid simply reading out the stats.
-        2. **Connect the dots**: Relate the file types or commit message to the risk score.
-        3. **Interpret the metrics**
-        4. Be professional, direct, and concise (2 sentences max).
+        RESPONSE:
         """
+        
         try:
             chat = self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=self.model, 
-                max_tokens=150,
-                temperature=0.1
+                model=self.model, max_tokens=250, temperature=0.2
             )
             return chat.choices[0].message.content
-        except Exception as e: 
-            return f"AI Analysis failed: {str(e)}"
-
-# 6. APP MAIN
-
+        except Exception as e: return f"AI Error: {str(e)}"
+# --- 4. FLASK APPLICATION ---
 app = Flask(__name__)
 CORS(app)
 
-print("Backport Assistant (Full AI)")
+print("Starting Backport Assistant (Production Mode)...")
+
+# Initialize Helpers
 history = HistoryManager()
-sem_engine = SemanticEngine()
-llm = LLMExplainer()
+extractor = FeatureExtractor()
+llm_explainer = LLMExplainer()
+
+# Start Background Updater
 bg_thread = threading.Thread(target=history.fetch_and_update, daemon=True)
 bg_thread.start()
 
+# Load XGBoost Model
+model = None
 try:
     model = xgb.Booster()
     model.load_model(Config.MODEL_PATH)
-    print("XGBoost loaded.")
-except: print("XGBoost Error.")
+    print("XGBoost Model loaded successfully.")
+except Exception as e:
+    print(f"CRITICAL: Failed to load model from {Config.MODEL_PATH}. Error: {e}")
 
-try: 
+# Load User Threshold
+try:
     with open(Config.THRESHOLD_PATH, "r") as f: THRESHOLD = float(f.read().strip())
 except: THRESHOLD = 0.50
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    """
-    Main API Endpoint.
-    1. Receives the Change JSON from the Chrome Extension.
-    2. Calls FeatureEngine to build the mathematical vector.
-    3. Runs the XGBoost model to predict the backport probability.
-    4. Calls the LLM to generate a text explanation.
-    5. Returns a JSON response containing the probability, explanation, and key metrics.
-    """
     try:
         data = request.json
-        features, display_type = FeatureEngine.build_vector(data, history, sem_engine)
+        if not data: return jsonify({"error": "No data provided"}), 400
         
+        # 1. Calculate Features (includes History lookups)
+        features, display_type = extractor.compute_features(data, history)
+        
+        if not features: 
+            return jsonify({"error": "Invalid Change Data (Missing revisions or files)"}), 400
+
+        # 2. Prepare DataFrame for XGBoost
+        # Convert dict to DataFrame (automatically aligns columns if model has feature names)
         df = pd.DataFrame([features])
-        t = features['11_nlp_change_type']
-        df['11_nlp_change_type_CI'] = 1 if t == 'CI' else 0
-        df['11_nlp_change_type_Doc'] = 1 if t == 'Doc' else 0
-        df['11_nlp_change_type_Feature'] = 1 if t == 'Feature' else 0
+        df = df.astype(float)
         
-        cols_drop = ['11_nlp_change_type', 'full_text_dl']
-        X = df.drop(columns=cols_drop).astype(float)
+        # 3. Predict
+        dmatrix = xgb.DMatrix(df)
+        prob = model.predict(dmatrix)[0]
         
-        if hasattr(model, 'feature_names'):
-            for c in model.feature_names:
-                if c not in X.columns: X[c] = 0.0
-            X = X[model.feature_names]
-            
-        prob = model.predict(xgb.DMatrix(X))[0]
-        
+        # 4. Generate AI Explanation
         raw_msg = data.get('revisions', {}).get(data.get('current_revision'), {}).get('commit', {}).get('message', '')
         raw_files = data.get('revisions', {}).get(data.get('current_revision'), {}).get('files', {})
         
-        ai_text = llm.explain(raw_msg, raw_files, prob, features, display_type, THRESHOLD)
+        explanation = llm_explainer.explain(raw_msg, raw_files, prob, features, display_type, THRESHOLD)
         
-        return jsonify({
+        # 5. Build Response
+        response = {
             "probability": float(prob),
-            "ai_explanation": ai_text,
+            "ai_explanation": explanation,
             "features_used": {
                 "nlp_type": display_type,
-                "max_path_depth": int(features['20_risk_module_coupling']),
-                "author_trust": float(features['16_author_trust_score']),
-                "entropy": float(features['24_change_entropy']),
-                "launchpad_heat": int(features['35_bug_heat'])
+                "author_trust": float(features['author_trust_score']),
+                "entropy": float(features['change_entropy']),
+                "file_risk": float(features['historical_file_prob']),
+                "churn_density": float(features['churn_density'])
             }
-        })
+        }
+        return jsonify(response)
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+@app.route('/threshold', methods=['POST'])
+def update_threshold():
+    """Allows the user to adjust sensitivity from the Chrome Extension."""
+    global THRESHOLD
+    try:
+        val = float(request.json.get('threshold'))
+        if 0 <= val <= 1:
+            THRESHOLD = val
+            with open(Config.THRESHOLD_PATH, "w") as f: f.write(str(val))
+            return jsonify({"status": "updated", "new_threshold": THRESHOLD})
+    except: pass
+    return jsonify({"error": "Invalid threshold"}), 400
+
 if __name__ == '__main__':
-    # host='0.0.0.0' is required for Docker
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    # Threaded=True allows handling multiple requests while background thread runs
+    app.run(host='0.0.0.0', port=5000, threaded=True)

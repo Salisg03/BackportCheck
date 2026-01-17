@@ -2,7 +2,7 @@
 const BACKEND_URL = "http://localhost:5000/predict";
 let currentThreshold = 0.50; 
 
-// Écoute les changements depuis le popup
+// Listen for changes from the popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "toggle_panel") {
         togglePanel();
@@ -11,18 +11,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// Nettoyage JSON Gerrit
+// Clean Gerrit JSON response
 function cleanGerritResponse(text) {
     if (text.startsWith(")]}'")) return text.substring(4).trim();
     return text;
 }
 
-// Fonction principale
+// Main function
 async function analyzeChange() {
     const btn = document.getElementById("bp-analyze-btn");
     const resultDiv = document.getElementById("bp-result-panel");
     
-    // Récupération ID
+    // Get change ID
     const match = window.location.pathname.match(/(\d+)(?:\/?$|\/?\?)/);
     if (!match) return;
     const changeId = match[1];
@@ -33,13 +33,13 @@ async function analyzeChange() {
     resultDiv.style.display = "none";
 
     try {
-        // 1. Récupération Données Gerrit
+        // 1. Fetch Gerrit data
         const gerritUrl = `/changes/${changeId}/detail?o=ALL_REVISIONS&o=CURRENT_COMMIT&o=CURRENT_FILES&o=MESSAGES&o=DETAILED_LABELS&o=DETAILED_ACCOUNTS`;
         const gerritResponse = await fetch(gerritUrl);
         const gerritText = await gerritResponse.text();
         const changeJson = JSON.parse(cleanGerritResponse(gerritText));
 
-        // 2. Appel Backend Python
+        // 2. Call Python backend
         const predictResponse = await fetch(BACKEND_URL, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -48,7 +48,7 @@ async function analyzeChange() {
 
         const prediction = await predictResponse.json();
         
-        // 3. Affichage
+        // 3. Display result
         displayResult(prediction);
 
     } catch (error) {
@@ -61,59 +61,73 @@ async function analyzeChange() {
     }
 }
 
-// AFFICHAGE (Style Pro & Neutre) 
+// DISPLAY (Updated UI with Verdict Banner)
 function displayResult(data) {
     const resultDiv = document.getElementById("bp-result-panel");
     const prob = (data.probability * 100).toFixed(1);
     
-    // Couleurs indicatives (juste pour la lisibilité, pas de jugement)
-    // Vert si > seuil, Orange si proche, Rouge si bas
-    let barColor = "#d32f2f"; // Rouge
-    if (data.probability >= currentThreshold) barColor = "#2e7d32"; // Vert
-    else if (data.probability >= 0.40) barColor = "#f57c00"; // Orange
-
+    // Verdict Logic
+    const isRecommended = data.probability >= currentThreshold;
+    const color = isRecommended ? "#2e7d32" : "#d32f2f"; 
+    const bgColor = isRecommended ? "#e8f5e9" : "#ffebee";
+    const verdictText = isRecommended ? "RECOMMENDED" : "NOT RECOMMENDED";
+    const verdictIcon = isRecommended ? "✅" : "⛔";
+    
     const aiText = data.ai_explanation || "No analysis available.";
+    const f = data.features_used; 
+
+    // Helper
+    const fmt = (n) => parseFloat(n).toFixed(2);
 
     resultDiv.innerHTML = `
-        <!-- 1. SCORE (Barre de progression) -->
-        <div style="margin-bottom: 15px;">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-                <span style="font-weight: 700; color: #555;">Confidence Score</span>
-                <span style="font-weight: 800; color: ${barColor};">${prob}%</span>
+        <!-- 1. VERDICT BANNER -->
+        <div style="background: ${bgColor}; border: 1px solid ${color}; border-radius: 6px; padding: 12px; text-align: center; margin-bottom: 15px;">
+            <div style="color: ${color}; font-weight: 800; font-size: 14px; letter-spacing: 0.5px; margin-bottom: 4px;">
+                ${verdictIcon} ${verdictText}
             </div>
-            <div style="width: 100%; height: 6px; background: #eee; border-radius: 3px; overflow: hidden;">
-                <div style="width: ${prob}%; height: 100%; background: ${barColor};"></div>
+            <div style="color: ${color}; font-size: 11px; opacity: 0.9;">
+                Confidence: <b>${prob}%</b> (Threshold: ${currentThreshold})
             </div>
         </div>
 
-        <!-- 2. ANALYSE IA (Style clean) -->
-        <div style="margin-bottom: 15px; background: #f9f9f9; padding: 10px; border-radius: 4px; border-left: 3px solid #ccc;">
-            <div style="font-size: 10px; font-weight: 700; color: #666; margin-bottom: 4px; text-transform: uppercase;">
-                AI Insight
+        <!-- 2. AI INSIGHT (Now powered by FULL Context) -->
+        <div style="margin-bottom: 15px;">
+            <div style="font-size: 11px; font-weight: 700; color: #555; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">
+                AI Reasoning
             </div>
-            <div style="font-size: 11px; line-height: 1.4; color: #333;">
+            <div style="background: #f8f9fa; padding: 10px; border-radius: 4px; border-left: 3px solid #607d8b; font-size: 12px; line-height: 1.5; color: #333;">
                 ${aiText}
             </div>
         </div>
 
-        <!-- 3. DETAILS TECHNIQUES (Grille) -->
-        <div style="border-top: 1px solid #eee; padding-top: 10px;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 11px;">
+        <!-- 3. KEY METRICS GRID (The "Big 4" Summary) -->
+        <div style="border-top: 1px solid #eee; padding-top: 12px;">
+            <div style="font-size: 10px; font-weight: 700; color: #999; margin-bottom: 8px;">KEY INDICATORS</div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 11px;">
+                
+                <!-- Factor 1 -->
                 <div>
-                    <span style="color: #777;">Risk Depth</span><br>
-                    <span style="font-weight: 600;">${data.features_used.max_path_depth}</span>
+                    <span style="color: #666; cursor: help;" title="Author Trust Score based on past history">👤 Author Trust</span><br>
+                    <span style="font-weight: 600; font-size: 13px;">${fmt(f.author_trust)}</span>
                 </div>
+
+                <!-- Factor 2 -->
                 <div>
-                    <span style="color: #777;">Author Trust</span><br>
-                    <span style="font-weight: 600;">${parseFloat(data.features_used.author_trust).toFixed(2)}</span>
+                    <span style="color: #666; cursor: help;" title="Probability that files in these directories are backported">📂 File Fit</span><br>
+                    <span style="font-weight: 600; font-size: 13px;">${fmt(f.file_risk)}</span>
                 </div>
+
+                <!-- Factor 3 -->
                 <div>
-                    <span style="color: #777;">Type</span><br>
-                    <span style="font-weight: 600;">${data.features_used.nlp_type}</span>
+                    <span style="color: #666; cursor: help;" title="Code Entropy / Complexity">🧩 Complexity</span><br>
+                    <span style="font-weight: 600; font-size: 13px;">${fmt(f.entropy)}</span>
                 </div>
+
+                <!-- Factor 4 -->
                 <div>
-                    <span style="color: #777;">Entropy</span><br>
-                    <span style="font-weight: 600;">${parseFloat(data.features_used.entropy).toFixed(2)}</span>
+                    <span style="color: #666;">🏷️ Type</span><br>
+                    <span style="font-weight: 600; font-size: 12px; background: #eee; padding: 2px 6px; border-radius: 4px;">${f.nlp_type}</span>
                 </div>
             </div>
         </div>
@@ -121,8 +135,7 @@ function displayResult(data) {
     
     resultDiv.style.display = "block";
 }
-
-//GESTION DU PANNEAU FLOTTANT 
+// FLOATING PANEL MANAGEMENT
 function togglePanel() {
     const panel = document.getElementById("bp-panel");
     if (panel) {
@@ -138,7 +151,7 @@ function injectUI() {
     const panel = document.createElement("div");
     panel.id = "bp-panel";
     
-    // Style du panneau 
+    // Panel styling
     panel.style.cssText = `
         position: fixed; bottom: 20px; right: 20px; width: 300px;
         background: white; 
@@ -190,16 +203,16 @@ function injectUI() {
     document.getElementById("bp-close").onclick = () => { panel.style.display = "none"; };
 }
 
-// Injection initiale
+// Initial injection
 setTimeout(injectUI, 1500);
 
-// Gestion navigation SPA (Gerrit ne recharge pas la page)
+// SPA navigation handling (Gerrit doesn't reload the page)
 let lastUrl = location.href;
 new MutationObserver(() => {
   if (location.href !== lastUrl) {
     lastUrl = location.href;
     injectUI();
     const resDiv = document.getElementById("bp-result-panel");
-    if (resDiv) resDiv.style.display = "none"; // Reset résultat sur changement de page
+    if (resDiv) resDiv.style.display = "none"; // Reset result on page change
   }
 }).observe(document, {subtree: true, childList: true});

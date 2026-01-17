@@ -8,13 +8,10 @@ import requests
 import textstat
 import pandas as pd
 import xgboost as xgb
-from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from collections import defaultdict
 from groq import Groq
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
 # Load environment variables (API Keys)

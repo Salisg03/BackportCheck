@@ -1,7 +1,7 @@
 
 # BackportCheck: A Hybrid AI Decision Support System for OpenStack Maintenance
 
-**Version:** 1.0.0
+**Version:** 1.0
 **Context:** International Conference Submission - Artifact Evaluation
 
 ## 1. Abstract

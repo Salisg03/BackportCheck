@@ -61,7 +61,7 @@ async function analyzeChange() {
     }
 }
 
-// DISPLAY (Updated UI with Verdict Banner)
+// DISPLAY 
 function displayResult(data) {
     const resultDiv = document.getElementById("bp-result-panel");
     const prob = (data.probability * 100).toFixed(1);
@@ -90,7 +90,7 @@ function displayResult(data) {
             </div>
         </div>
 
-        <!-- 2. AI INSIGHT (Now powered by FULL Context) -->
+        <!-- 2. AI INSIGHT -->
         <div style="margin-bottom: 15px;">
             <div style="font-size: 11px; font-weight: 700; color: #555; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">
                 AI Reasoning
@@ -100,33 +100,39 @@ function displayResult(data) {
             </div>
         </div>
 
-        <!-- 3. KEY METRICS GRID (The "Big 4" Summary) -->
+        <!-- 3. KEY METRICS GRID -->
         <div style="border-top: 1px solid #eee; padding-top: 12px;">
-            <div style="font-size: 10px; font-weight: 700; color: #999; margin-bottom: 8px;">KEY INDICATORS</div>
+            <div style="font-size: 10px; font-weight: 700; color: #999; margin-bottom: 8px;">RISK FACTORS</div>
             
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 11px;">
                 
-                <!-- Factor 1 -->
+                <!-- Factor 1: Author -->
                 <div>
-                    <span style="color: #666; cursor: help;" title="Author Trust Score based on past history">👤 Author Trust</span><br>
+                    <span style="color: #666; cursor: help; border-bottom: 1px dotted #ccc;" title="Success rate of this author's previous backports.">
+                        👤 Author Reliability
+                    </span><br>
                     <span style="font-weight: 600; font-size: 13px;">${fmt(f.author_trust)}</span>
                 </div>
 
-                <!-- Factor 2 -->
+                <!-- Factor 2: Files -->
                 <div>
-                    <span style="color: #666; cursor: help;" title="Probability that files in these directories are backported">📂 File Fit</span><br>
+                    <span style="color: #666; cursor: help; border-bottom: 1px dotted #ccc;" title="How often these specific files are accepted in backports (0=Never, 1=Always).">
+                        📂 File Freq.
+                    </span><br>
                     <span style="font-weight: 600; font-size: 13px;">${fmt(f.file_risk)}</span>
                 </div>
 
-                <!-- Factor 3 -->
+                <!-- Factor 3: Entropy -->
                 <div>
-                    <span style="color: #666; cursor: help;" title="Code Entropy / Complexity">🧩 Complexity</span><br>
+                    <span style="color: #666; cursor: help; border-bottom: 1px dotted #ccc;" title="Measures if the change is focused (Low) or scattered across many folders (High).">
+                        🧩 Code Spread
+                    </span><br>
                     <span style="font-weight: 600; font-size: 13px;">${fmt(f.entropy)}</span>
                 </div>
 
-                <!-- Factor 4 -->
+                <!-- Factor 4: Type -->
                 <div>
-                    <span style="color: #666;">🏷️ Type</span><br>
+                    <span style="color: #666;">🏷️ Category</span><br>
                     <span style="font-weight: 600; font-size: 12px; background: #eee; padding: 2px 6px; border-radius: 4px;">${f.nlp_type}</span>
                 </div>
             </div>
@@ -135,6 +141,7 @@ function displayResult(data) {
     
     resultDiv.style.display = "block";
 }
+
 // FLOATING PANEL MANAGEMENT
 function togglePanel() {
     const panel = document.getElementById("bp-panel");
@@ -153,19 +160,20 @@ function injectUI() {
     
     // Panel styling
     panel.style.cssText = `
-        position: fixed; bottom: 20px; right: 20px; width: 300px;
+        position: fixed; bottom: 20px; right: 20px; width: 320px;
         background: white; 
-        box-shadow: 0 4px 20px rgba(0,0,0,0.12); 
+        box-shadow: 0 4px 20px rgba(0,0,0,0.15); 
         border-radius: 8px; border: 1px solid #e0e0e0;
         z-index: 9999; font-family: "Segoe UI", Roboto, sans-serif; font-size: 12px;
         overflow: hidden;
     `;
 
-    // HEADER
+    // HEADER (Now draggable)
     const header = document.createElement("div");
     header.style.cssText = `
-        padding: 12px 15px; background: #fff; border-bottom: 1px solid #f0f0f0;
+        padding: 12px 15px; background: #f8f9fa; border-bottom: 1px solid #eee;
         display: flex; justify-content: space-between; align-items: center;
+        cursor: move; user-select: none;
     `;
     
     header.innerHTML = `
@@ -173,6 +181,40 @@ function injectUI() {
         <span id="bp-close" style="cursor: pointer; font-size: 18px; color: #999; line-height: 1;">&times;</span>
     `;
     
+    // DRAG LOGIC
+    let isDragging = false;
+    let startX, startY, initialLeft, initialTop;
+
+    header.onmousedown = (e) => {
+        isDragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        
+        const rect = panel.getBoundingClientRect();
+        initialLeft = rect.left;
+        initialTop = rect.top;
+        
+        panel.style.bottom = "auto";
+        panel.style.right = "auto";
+        panel.style.left = initialLeft + "px";
+        panel.style.top = initialTop + "px";
+        
+        header.style.cursor = "grabbing";
+    };
+
+    document.onmousemove = (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        panel.style.left = (initialLeft + dx) + "px";
+        panel.style.top = (initialTop + dy) + "px";
+    };
+
+    document.onmouseup = () => {
+        isDragging = false;
+        header.style.cursor = "move";
+    };
+
     // BODY
     const body = document.createElement("div");
     body.style.padding = "15px";
@@ -181,9 +223,9 @@ function injectUI() {
     btn.id = "bp-analyze-btn";
     btn.textContent = "Analyze Eligibility";
     btn.style.cssText = `
-        width: 100%; padding: 9px; background: #005c9c; color: white;
-        border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px;
-        transition: background 0.2s;
+        width: 100%; padding: 10px; background: #005c9c; color: white;
+        border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 13px;
+        transition: background 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     `;
     btn.onmouseover = () => btn.style.background = "#004a7c";
     btn.onmouseout = () => btn.style.background = "#005c9c";
@@ -206,13 +248,13 @@ function injectUI() {
 // Initial injection
 setTimeout(injectUI, 1500);
 
-// SPA navigation handling (Gerrit doesn't reload the page)
+// SPA navigation handling
 let lastUrl = location.href;
 new MutationObserver(() => {
   if (location.href !== lastUrl) {
     lastUrl = location.href;
     injectUI();
     const resDiv = document.getElementById("bp-result-panel");
-    if (resDiv) resDiv.style.display = "none"; // Reset result on page change
+    if (resDiv) resDiv.style.display = "none"; 
   }
 }).observe(document, {subtree: true, childList: true});

@@ -37,7 +37,24 @@ document.addEventListener('DOMContentLoaded', () => {
         // Optional: Close popup after clicking toggle for cleaner UX
         // window.close(); 
     });
+    const infoTrigger = document.getElementById('toggle-info');
+    const infoSection = document.getElementById('info-section');
+    const arrow = document.querySelector('.arrow');
 
+    infoTrigger.addEventListener('click', (e) => {
+        e.preventDefault(); // Stop it from jumping to top of page
+        
+        if (infoSection.style.display === "none") {
+            // Show it
+            infoSection.style.display = "block";
+            arrow.classList.add("open");
+            // Optional: Auto-resize popup height if needed (Chrome handles this mostly)
+        } else {
+            // Hide it
+            infoSection.style.display = "none";
+            arrow.classList.remove("open");
+        }
+    });
     // --- Helpers ---
 
     function syncThreshold(val) {

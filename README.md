@@ -60,7 +60,12 @@ The core risk assessment is performed by a **Gradient Boosting Classifier**, cho
 
 
 ### 3.3. Explainable AI (Llama 3)
-To ensure trust and transparency, the numerical predictions are interpreted by a Large Language Model (LLM). The system injects the full feature vector (including boolean safety flags for DB migrations and API changes) into **Llama 3-70b**. The LLM acts as a virtual Release Manager, synthesizing the data into a professional, context-aware justification for the recommendation.
+To bridge the gap between numerical probability and human reasoning, the system employs a **Generative AI Agent** (Llama 3-70b) via the Groq API. Unlike simple template-based explanations, the system constructs a **structured decision context** for the LLM to analyze.
+
+The prompt is dynamically assembled from three distinct data sources to ensure the explanation is grounded in reality:
+1.  **Change Artifacts:** The raw **commit message** (for semantic intent) and the **list of modified files** (for architectural scope).
+2.  **Predictive Outcome:** The XGBoost **confidence score**, the calculated **verdict** (Recommended/Rejected), and the active **user sensitivity threshold**.
+3.  **Risk Vector:** The full 37-feature set
 
 ## 4. Installation & Usage
 

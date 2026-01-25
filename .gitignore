@@ -1,3 +1,1 @@
 .env
-# local model cache
-backend_server/model_cache/

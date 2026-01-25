@@ -8,5 +8,4 @@ __pycache__/
 
 .env
 docker-compose.yml
-model_cache/
 *.jsonl
